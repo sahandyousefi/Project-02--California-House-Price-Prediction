@@ -1,0 +1,379 @@
+# # Libraries
+
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+import os
+import seaborn as sns
+from pyspark import SparkConf, SparkContext
+from pyspark.sql import SparkSession, SQLContext
+from pyspark.sql.types import *
+import pyspark.sql.functions as F
+from pyspark.sql.functions import udf, col
+from pyspark.ml.regression import LinearRegression
+from pyspark.mllib.evaluation import RegressionMetrics
+from pyspark.ml.tuning import ParamGridBuilder, CrossValidator, CrossValidatorModel
+from pyspark.ml.feature import VectorAssembler, StandardScaler
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.sql import SparkSession
+
+# Input data files are available in the read-only "../input/" directory
+# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
+
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+    for filename in filenames:
+        print(os.path.join(dirname, filename))
+    
+
+
+#Check the schema
+df_housing.printSchema()
+
+#print column names
+df_housing.columns
+
+
+#Checking data entries for each column
+df_housing.select(['longitude',
+ 'latitude',
+ 'housing_median_age',
+ 'total_rooms',
+ 'total_bedrooms']).describe().show()
+ 
+ 
+ 
+ df_housing.select(['population',
+ 'households',
+ 'median_income',
+ 'median_house_value',
+ 'ocean_proximity']).describe().show()
+ 
+ 
+ #column overview
+pd.DataFrame(df_housing.dtypes, columns = ['Column Name','Data type'])
+
+
+df_housing.select(['longitude']).show()
+
+
+
+#Check any missing value
+for column in df_housing.columns:
+    print(column, df_housing.filter(col(column).cast("float").isin([None,np.nan])).count())
+ 
+ 
+ 
+ #Data imputation
+df_housing = df_housing.withColumnRenamed('median_house_value','price')
+df_housing.na.drop()
+
+
+#Checking if the prices are normally distributed
+sns.distplot(df_housing.select('price').toPandas(), color="skyblue")
+df_housing.select(F.skewness('price'), F.kurtosis('price')).show()
+
+
+
+
+#Housing prices greater than 500,000 (expensive houses)
+print("No of houses: %i" % df_housing.select('price').count())
+print("No of houses greater than $500000 are: %i" % df_housing.filter(df_housing["price"] > 500000).count())
+
+
+#Distribution of prices
+sns.set_style("darkgrid")
+sns.histplot(df_housing.select('price').toPandas(), bins = 10)
+
+
+
+#Average price of house
+import matplotlib.pyplot as plt
+df1 = df_housing.groupby('total_rooms').avg().sort('total_rooms').select(['total_rooms','avg(price)'])
+df_p = df1.toPandas()
+plt.figure(figsize = (15, 8))
+sns.scatterplot(x = df_p['total_rooms'], y = df_p['avg(price)'] )
+
+
+
+
+
+#Adding a column of per-capita income to the dataframe
+df_housing = df_housing.withColumn('per_capita_income', df_housing['median_income']*10000/df_housing['population'])
+
+
+
+#per_capita_income distribution 
+g = sns.histplot(df_housing.select('per_capita_income').toPandas())
+g.set(xlim = (0, 500))
+
+
+#Per-capita-income and prices of the home
+df_p = df_housing.toPandas()
+sns.scatterplot(x = df_p['per_capita_income'], y = df_p['price'])
+
+
+
+
+#Counting per capita that are less than $100
+count_blocks = df_housing.filter('per_capita_income <  100').count()/df_housing.select('per_capita_income').count()*100
+print("Percentage of blocks below $100 per capita: %2f" % count_blocks)
+
+
+#Checking unique values in ocean_proximity
+
+df_housing.select('ocean_proximity').distinct().show()
+
+
+#Where do wealthy people live?
+
+df_i = df_housing.groupby('ocean_proximity').agg({'median_income' : 'avg'})
+df_p = df_i.toPandas()
+sns.barplot(x = df_p['ocean_proximity'], y = df_p['avg(median_income)']*10000)
+
+
+#Label-encoding for the "ocean_proximity" column
+
+from pyspark.ml.feature import StringIndexer
+indexer = StringIndexer(inputCol="ocean_proximity", outputCol="ocean_proximity_index") 
+df_housing = indexer.fit(df_housing).transform(df_housing)
+df_housing = df_housing.drop('ocean_proximity')
+df_housing.select('ocean_proximity_index').show(3)
+
+
+
+
+
+#Removing na values to ensure correlation method works properly
+
+mean = df_housing.select(F.mean('total_bedrooms')).collect()[0][0]
+df_housing = df_housing.na.fill({'total_bedrooms': mean})
+
+
+#Checking if na values exist in 'total_bedrooms' columns
+
+df_housing.filter(col('total_bedrooms').isNull()).show()
+
+
+
+# convert to vector column first
+
+assembler = VectorAssembler(inputCols=df_housing.columns, outputCol="features")
+df_vector = assembler.transform(df_housing).select("features")
+ 
+ 
+ 
+ 
+# get correlation matrix
+
+matrix = Correlation.corr(df_vector, 'features')
+corrmatrix = matrix.collect()[0][0].toArray().tolist()
+ 
+ 
+ 
+ 
+#Converst to pandas dataframe
+
+df_corr = pd.DataFrame(corrmatrix, columns = df_housing.columns, index = df_housing.columns)
+ 
+ 
+ 
+#plot correlation matrix by using seaborn
+
+sns.heatmap(df_corr)
+
+
+
+
+#Drop non-correlated columns
+
+df_model = df_housing.select(['housing_median_age','total_rooms', 'median_income','price'])
+
+
+
+#Checking normal distribution of selected fetures
+#housing_median_age
+ 
+sns.distplot(df_housing.select('housing_median_age').toPandas(), color="skyblue")
+df_housing.select(F.skewness('housing_median_age'), F.kurtosis('housing_median_age')).show()
+
+
+
+
+#Checking normal distribution of selected fetures
+#total_rooms
+ 
+sns.distplot(df_housing.select('total_rooms').toPandas(), color="skyblue")
+df_housing.select(F.skewness('total_rooms'), F.kurtosis('total_rooms')).show()
+
+
+
+
+#Using lograthimic scale to normalize the data
+ 
+df_model = df_model.withColumn("total_rooms_log", F.log10(col("total_rooms")))
+ 
+sns.distplot(df_model.select('total_rooms_log').toPandas(), color="skyblue")
+df_model.select(F.skewness('total_rooms_log'), F.kurtosis('total_rooms_log')).show()
+
+
+
+
+
+#Checking normal distribution of selected fetures
+#median_income
+ 
+sns.distplot(df_housing.select('median_income').toPandas(), color="skyblue")
+df_housing.select(F.skewness('median_income'), F.kurtosis('median_income')).show()
+
+
+
+
+#Assembling features
+
+feature_assembly = VectorAssembler(inputCols = ['housing_median_age','total_rooms_log', 'median_income'], outputCol = 'features')
+output = feature_assembly.transform(df_model)
+output.show(3)
+ 
+ 
+ 
+ 
+#Normalizing the features
+ 
+scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures",
+                        withStd=True, withMean=False)
+ 
+ 
+ 
+# Compute summary statistics by fitting the StandardScaler
+
+scalerModel = scaler.fit(output)
+ 
+
+
+# Normalize each feature to have unit standard deviation.
+
+scaledOutput = scalerModel.transform(output)
+scaledOutput.show(3)
+
+
+
+#Selecting input and output column from output
+
+df_model_final = scaledOutput.select(['price', 'scaledFeatures'])
+df_model_final.show(3)
+
+
+
+from pyspark.ml.regression import LinearRegression 
+
+
+#test train split
+
+df_train, df_test = df_model_final.randomSplit([0.75, 0.25])
+regressor = LinearRegression(featuresCol = 'scaledFeatures', labelCol = 'price')
+regressor = regressor.fit(df_train)
+
+
+
+#MSE for the train data
+ 
+pred_results = regressor.evaluate(df_train)
+print("The MSE for the model is: %2f"% pred_results.meanAbsoluteError)
+print("The r2 for the model is: %2f"% pred_results.r2)
+
+
+#Checking test performance
+pred_results = regressor.evaluate(df_test)
+print("The MSE for the model is: %2f"% pred_results.meanAbsoluteError)
+print("The r2 for the model is: %2f"% pred_results.r2)
+
+
+spark = SparkSession.builder.appName("trees").getOrCreate()
+
+
+from pyspark.sql.functions import col
+df.select(*(col(c).cast("integer").alias(c) for c in df.columns))
+df.printSchema()
+
+
+
+
+
+# We can also make use of datatypes from 
+# pyspark.sql.types
+
+from pyspark.sql.types import StringType, DateType, FloatType, IntegerType
+
+new_df = df \
+  .withColumn("longitude" ,
+              df["longitude"]
+              .cast(IntegerType()))   \
+  .withColumn("latitude",
+              df["latitude"]
+              .cast(IntegerType()))    \
+  .withColumn("housing_median_age"  ,
+              df["housing_median_age"]
+              .cast(IntegerType())) \
+  .withColumn("total_rooms" ,
+              df["total_rooms"]
+              .cast(IntegerType()))   \
+  .withColumn("total_bedrooms",
+              df["total_bedrooms"]
+              .cast(IntegerType()))    \
+  .withColumn("population"  ,
+              df["population"]
+              .cast(IntegerType())) \
+ .withColumn("households" ,
+              df["households"]
+              .cast(IntegerType()))   \
+  .withColumn("median_income",
+              df["median_income"]
+              .cast(IntegerType()))    \
+  .withColumn("median_house_value"  ,
+              df["median_house_value"]
+              .cast(IntegerType())) \
+ 
+new_df.printSchema()
+ 
+new_df.show()
+
+
+
+
+
+
+# Prediction Phase- ML Models
+
+from pyspark.ml.classification import DecisionTreeClassifier, RandomForestClassifier, GBTClassifier
+from pyspark.ml import Pipeline
+
+dtc = DecisionTreeClassifier(labelCol="ocean_proximity_index", featuresCol="features")
+rfc= RandomForestClassifier(labelCol="ocean_proximity_index", featuresCol="features")
+
+dtc_model = dtc.fit(train)
+rfc_model = rfc.fit(train)
+
+
+evaluator = MulticlassClassificationEvaluator(labelCol="ocean_proximity_index", predictionCol="prediction", metricName="accuracy")
+
+
+
+dtc_acc = evaluator.evaluate(dtc_pred)
+rfc_acc = evaluator.evaluate(rfc_pred)
+
+
+
+print("-"*90)
+print(f"DTC ACC: {dtc_acc}")
+print("-"*90)
+print(f"RFC ACC: {rfc_acc}")
+
+
+
+
+
+
+
+
+
+
